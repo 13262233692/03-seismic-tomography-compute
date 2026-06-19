@@ -299,4 +299,80 @@ PYBIND11_MODULE(seismic_engine, m) {
     }, py::arg("data"), py::arg("nx"), py::arg("ny"), py::arg("nz"),
        py::arg("halo_width") = 1, py::arg("replace_value") = 0.0,
        "Repair NaN/Inf cells by averaging valid neighbors");
+
+    py::enum_<seismic::SliceAxis>(m, "SliceAxis")
+        .value("X", seismic::SliceAxis::X)
+        .value("Y", seismic::SliceAxis::Y)
+        .value("Z", seismic::SliceAxis::Z)
+        .value("VOLUME", seismic::SliceAxis::VOLUME);
+
+    py::class_<seismic::SliceSpec>(m, "SliceSpec")
+        .def(py::init<>())
+        .def(py::init<seismic::SliceAxis, int64_t, int64_t>())
+        .def_readwrite("axis", &seismic::SliceSpec::axis)
+        .def_readwrite("index", &seismic::SliceSpec::index)
+        .def_readwrite("stride", &seismic::SliceSpec::stride);
+
+    py::class_<seismic::RTMImageCondition>(m, "RTMImageCondition")
+        .def_readonly("image", [](seismic::RTMImageCondition& ic) {
+            auto result = py::array_t<double>(ic.image.size());
+            auto r = result.mutable_unchecked<1>();
+            for (size_t i = 0; i < ic.image.size(); ++i) r(i) = ic.image[i];
+            return result;
+        })
+        .def_readonly("illumination", [](seismic::RTMImageCondition& ic) {
+            auto result = py::array_t<double>(ic.illumination.size());
+            auto r = result.mutable_unchecked<1>();
+            for (size_t i = 0; i < ic.illumination.size(); ++i) r(i) = ic.illumination[i];
+            return result;
+        })
+        .def_readonly("reflectivity", [](seismic::RTMImageCondition& ic) {
+            auto result = py::array_t<double>(ic.reflectivity.size());
+            auto r = result.mutable_unchecked<1>();
+            for (size_t i = 0; i < ic.reflectivity.size(); ++i) r(i) = ic.reflectivity[i];
+            return result;
+        });
+
+    py::class_<seismic::RTMEngine::CapturedSlice>(m, "CapturedSlice")
+        .def_readonly("timestep", &seismic::RTMEngine::CapturedSlice::timestep)
+        .def_readonly("axis", &seismic::RTMEngine::CapturedSlice::axis)
+        .def_readonly("index", &seismic::RTMEngine::CapturedSlice::index)
+        .def_readonly("dim0", &seismic::RTMEngine::CapturedSlice::dim0)
+        .def_readonly("dim1", &seismic::RTMEngine::CapturedSlice::dim1)
+        .def_readonly("capture_timestamp", &seismic::RTMEngine::CapturedSlice::capture_timestamp)
+        .def_property_readonly("forward_slice", [](seismic::RTMEngine::CapturedSlice& s) {
+            auto result = py::array_t<double>(s.forward_slice.size());
+            auto r = result.mutable_unchecked<1>();
+            for (size_t i = 0; i < s.forward_slice.size(); ++i) r(i) = s.forward_slice[i];
+            return result.reshape({(ssize_t)s.dim0, (ssize_t)s.dim1});
+        })
+        .def_property_readonly("adjoint_slice", [](seismic::RTMEngine::CapturedSlice& s) {
+            auto result = py::array_t<double>(s.adjoint_slice.size());
+            auto r = result.mutable_unchecked<1>();
+            for (size_t i = 0; i < s.adjoint_slice.size(); ++i) r(i) = s.adjoint_slice[i];
+            return result.reshape({(ssize_t)s.dim0, (ssize_t)s.dim1});
+        })
+        .def_property_readonly("ic_slice", [](seismic::RTMEngine::CapturedSlice& s) {
+            auto result = py::array_t<double>(s.ic_slice.size());
+            auto r = result.mutable_unchecked<1>();
+            for (size_t i = 0; i < s.ic_slice.size(); ++i) r(i) = s.ic_slice[i];
+            return result.reshape({(ssize_t)s.dim0, (ssize_t)s.dim1});
+        });
+
+    py::class_<seismic::RTMConfig>(m, "RTMConfig")
+        .def(py::init<>())
+        .def_readwrite("enable_rtm", &seismic::RTMConfig::enable_rtm)
+        .def_readwrite("enable_snapshots", &seismic::RTMConfig::enable_snapshots)
+        .def_readwrite("snapshot_interval", &seismic::RTMConfig::snapshot_interval)
+        .def_readwrite("enable_mmap_writer", &seismic::RTMConfig::enable_mmap_writer)
+        .def_readwrite("mmap_filename", &seismic::RTMConfig::mmap_filename)
+        .def_readwrite("mmap_max_bytes", &seismic::RTMConfig::mmap_max_bytes)
+        .def_readwrite("ring_buffer_capacity", &seismic::RTMConfig::ring_buffer_capacity)
+        .def_readwrite("slice_specs", &seismic::RTMConfig::slice_specs);
+
+    py::class_<seismic::MmapSnapshotWriter::Stats>(m, "MmapStats")
+        .def_readonly("frames_written", &seismic::MmapSnapshotWriter::Stats::frames_written)
+        .def_readonly("frames_dropped_buffer_full", &seismic::MmapSnapshotWriter::Stats::frames_dropped_buffer_full)
+        .def_readonly("total_bytes_written", &seismic::MmapSnapshotWriter::Stats::total_bytes_written)
+        .def_readonly("mmap_cycles", &seismic::MmapSnapshotWriter::Stats::mmap_cycles);
 }

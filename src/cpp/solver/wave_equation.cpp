@@ -12,13 +12,18 @@ WaveEquationSolver::WaveEquationSolver(const MpiContext& mpi,
                                        const SolverConfig& config)
     : mpi_(mpi), grid_(grid), config_(config),
       ft_(mpi.config().cart_comm, mpi.config().rank, mpi.config().size),
-      amplitude_limit_(1e10) {
+      amplitude_limit_(1e10),
+      snapshots_captured_(0), snapshots_dropped_(0), rtm_enabled_(false) {
     int64_t n = grid_.local().total_cells_with_halo;
     field_.current.assign(n, 0.0);
     field_.previous.assign(n, 0.0);
     field_.next.assign(n, 0.0);
     field_.velocity.assign(n, 0.0);
     init_sponge_coefficients();
+}
+
+WaveEquationSolver::~WaveEquationSolver() {
+    shutdown_rtm_resources();
 }
 
 void WaveEquationSolver::initialize_velocity(double vp0) {
@@ -498,6 +503,188 @@ void WaveEquationSolver::reset_field() {
     std::fill(field_.previous.begin(), field_.previous.end(), 0.0);
     std::fill(field_.next.begin(), field_.next.end(), 0.0);
     field_.snapshots.clear();
+}
+
+void WaveEquationSolver::configure_rtm(const RTMConfig& rtm_cfg) {
+    shutdown_rtm_resources();
+    rtm_cfg_ = rtm_cfg;
+    if (rtm_cfg_.enable_rtm || rtm_cfg_.enable_snapshots) {
+        init_rtm_resources();
+    }
+}
+
+void WaveEquationSolver::init_rtm_resources() {
+    const auto& params = grid_.params();
+    const auto& loc = grid_.local();
+
+    rtm_engine_ = std::make_unique<RTMEngine>(
+        loc.nx_local, loc.ny_local, loc.nz_local,
+        params.dx, params.dy, params.dz,
+        params.halo_width
+    );
+
+    if (!rtm_cfg_.slice_specs.empty()) {
+        rtm_engine_->set_slice_specs(rtm_cfg_.slice_specs);
+    } else {
+        std::vector<SliceSpec> defaults = {
+            {SliceAxis::Z, -1, 1},
+            {SliceAxis::Y, -1, 1},
+            {SliceAxis::X, -1, 1},
+        };
+        rtm_engine_->set_slice_specs(defaults);
+    }
+
+    rtm_buffer_ = std::make_unique<LockFreeSnapshotBuffer>(rtm_cfg_.ring_buffer_capacity);
+
+    if (rtm_cfg_.enable_mmap_writer && !rtm_cfg_.mmap_filename.empty()) {
+        mmap_writer_ = std::make_unique<MmapSnapshotWriter>();
+        if (!mmap_writer_->open(rtm_cfg_.mmap_filename, rtm_cfg_.mmap_max_bytes)) {
+            mmap_writer_.reset();
+        } else if (rtm_buffer_) {
+            mmap_writer_->start_async_drain(*rtm_buffer_);
+        }
+    }
+
+    if (rtm_engine_) {
+        rtm_engine_->set_slice_callback([this](const RTMEngine::CapturedSlice& slice) {
+            if (rtm_buffer_) {
+                if (!rtm_buffer_->try_enqueue(slice)) {
+                    snapshots_dropped_.fetch_add(1, std::memory_order_release);
+                } else {
+                    snapshots_captured_.fetch_add(1, std::memory_order_release);
+                }
+            }
+        });
+    }
+
+    rtm_enabled_.store(true, std::memory_order_release);
+}
+
+void WaveEquationSolver::shutdown_rtm_resources() {
+    if (!rtm_enabled_.load(std::memory_order_acquire)) return;
+    rtm_enabled_.store(false, std::memory_order_release);
+
+    if (mmap_writer_) {
+        mmap_writer_->stop_async_drain();
+        mmap_writer_->close();
+        mmap_writer_.reset();
+    }
+
+    rtm_buffer_.reset();
+    rtm_engine_.reset();
+}
+
+void WaveEquationSolver::store_forward_wavefield_for_rtm(int timestep) {
+    (void)timestep;
+    if (!rtm_enabled_.load(std::memory_order_acquire)) return;
+
+    const auto& loc = grid_.local();
+    int64_t n = loc.total_cells_with_halo;
+
+    if (!forward_snapshots_) {
+        forward_snapshots_ = std::make_unique<WaveField>();
+        forward_snapshots_->current.assign(n, 0.0);
+    }
+
+    if (static_cast<int64_t>(forward_snapshots_->current.size()) != n) {
+        forward_snapshots_->current.assign(n, 0.0);
+    }
+
+    std::memcpy(forward_snapshots_->current.data(),
+                field_.current.data(),
+                static_cast<size_t>(n) * sizeof(double));
+}
+
+void WaveEquationSolver::apply_rtm_step(int timestep, bool with_snapshot) {
+    if (!rtm_enabled_.load(std::memory_order_acquire) || !rtm_engine_) return;
+
+    const auto& loc = grid_.local();
+
+    rtm_engine_->apply_image_condition(
+        forward_snapshots_ ? forward_snapshots_->current.data() : field_.current.data(),
+        field_.current.data(),
+        loc.ny_with_halo, loc.nz_with_halo,
+        timestep
+    );
+
+    if (with_snapshot) {
+        rtm_engine_->extract_slices(
+            forward_snapshots_ ? forward_snapshots_->current.data() : field_.current.data(),
+            field_.current.data(),
+            rtm_engine_->result().image.data(),
+            loc.ny_with_halo, loc.nz_with_halo,
+            timestep
+        );
+    }
+}
+
+PropagationResult WaveEquationSolver::run_rtm(
+    const std::vector<double>& source_wavelet,
+    const std::vector<double>& receiver_residuals) {
+
+    PropagationResult result;
+    result.status = StepResult::OK;
+    result.total_nan_encountered = 0;
+    result.total_cells_repaired = 0;
+    result.timesteps_completed = 0;
+    result.completed_successfully = false;
+
+    if (!rtm_enabled_.load(std::memory_order_acquire)) {
+        result.status = StepResult::OK;
+        result.completed_successfully = true;
+        return result;
+    }
+
+    if (rtm_engine_) rtm_engine_->reset_image();
+
+    int64_t n = grid_.local().total_cells_with_halo;
+    std::vector<double> forward_field_storage(n, 0.0);
+    std::vector<std::vector<double>> forward_snapshots_storage;
+    forward_snapshots_storage.reserve(config_.nt / rtm_cfg_.snapshot_interval + 2);
+
+    reset_field();
+    for (int t = 0; t < config_.nt; ++t) {
+        if (t < static_cast<int>(source_wavelet.size())) {
+            int64_t cx = grid_.local().nx_local / 2;
+            int64_t cy = grid_.local().ny_local / 2;
+            int64_t cz = grid_.local().nz_local / 2;
+            std::vector<double> w = {source_wavelet[t]};
+            inject_source(cx, cy, cz, w);
+        }
+
+        StepResult sr = step_forward(t);
+        if (sr == StepResult::FATAL_DIVERGENCE) {
+            result.status = sr;
+            result.timesteps_completed = t;
+            return result;
+        }
+        if (sr == StepResult::NAN_DETECTED_AND_REPAIRED) {
+            result.status = sr;
+        }
+
+        if (t % rtm_cfg_.snapshot_interval == 0) {
+            forward_snapshots_storage.push_back(field_.current);
+            store_forward_wavefield_for_rtm(t);
+            apply_rtm_step(t, true);
+        } else {
+            store_forward_wavefield_for_rtm(t);
+            apply_rtm_step(t, false);
+        }
+
+        ++result.timesteps_completed;
+    }
+
+    const auto& loc = grid_.local();
+    rtm_engine_->apply_image_condition(
+        field_.current.data(), receiver_residuals.data(),
+        loc.ny_with_halo, loc.nz_with_halo, config_.nt
+    );
+
+    if (rtm_engine_) rtm_engine_->finalize_image();
+
+    result.total_cells_repaired = ft_.stats().cells_repaired;
+    result.completed_successfully = true;
+    return result;
 }
 
 }
