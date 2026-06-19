@@ -76,6 +76,9 @@ class VelocityModel:
                 self.rho[ix, iy, :sf_iz] = 1025.0
 
     def clamp_values(self):
+        self.vp = np.where(np.isfinite(self.vp), self.vp, self.vp_min)
+        self.vs = np.where(np.isfinite(self.vs), self.vs, self.vs_min)
+        self.rho = np.where(np.isfinite(self.rho), self.rho, self.rho_min)
         self.vp = np.clip(self.vp, self.vp_min, self.vp_max)
         self.vs = np.clip(self.vs, self.vs_min, self.vs_max)
         self.rho = np.clip(self.rho, self.rho_min, self.rho_max)

@@ -92,7 +92,8 @@ class GradientComputer:
         self._gradient = gradient
         return gradient
 
-    def build_depth_preconditioner(self, water_depth_iz: int) -> np.ndarray:
+    def build_depth_preconditioner(self, water_depth_iz: int,
+                                    dz: float = 200.0) -> np.ndarray:
         n = self.nx * self.ny * self.nz
         precond = np.ones(n)
 
@@ -100,7 +101,7 @@ class GradientComputer:
             if iz < water_depth_iz:
                 precond.reshape(self.nx, self.ny, self.nz)[:, :, iz] = 0.0
             else:
-                depth_factor = 1.0 / (1.0 + (iz - water_depth_iz) * self.dz / 10000.0)
+                depth_factor = 1.0 / (1.0 + (iz - water_depth_iz) * dz / 10000.0)
                 precond.reshape(self.nx, self.ny, self.nz)[:, :, iz] = depth_factor
 
         self._preconditioner = precond

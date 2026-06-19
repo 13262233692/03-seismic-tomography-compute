@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.18)
 project(seismic_tomography
-    VERSION 1.0.0
+    VERSION 1.1.0
     LANGUAGES CXX
     DESCRIPTION "Deep-sea seismic wave tomography imaging system"
 )
@@ -54,6 +54,7 @@ set(SEISMIC_SOURCES
     src/cpp/core/mpi_context.cpp
     src/cpp/core/grid.cpp
     src/cpp/core/config.cpp
+    src/cpp/core/fault_tolerance.cpp
     src/cpp/solver/wave_equation.cpp
     src/cpp/solver/boundary.cpp
     src/cpp/sparse/csr_matrix.cpp

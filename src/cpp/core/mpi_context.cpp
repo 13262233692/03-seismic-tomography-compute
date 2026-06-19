@@ -66,6 +66,18 @@ double MpiContext::allreduce_sum(double local_val) const {
     return global_val;
 }
 
+int MpiContext::allreduce_max_int(int local_val) const {
+    int global_val;
+    MPI_Allreduce(&local_val, &global_val, 1, MPI_INT, MPI_MAX, cfg_.cart_comm);
+    return global_val;
+}
+
+int64_t MpiContext::allreduce_sum_int64(int64_t local_val) const {
+    int64_t global_val;
+    MPI_Allreduce(&local_val, &global_val, 1, MPI_LONG_LONG, MPI_SUM, cfg_.cart_comm);
+    return global_val;
+}
+
 void MpiContext::send_double(const double* buf, int count, int dest, int tag) const {
     MPI_Send(buf, count, MPI_DOUBLE, dest, tag, cfg_.cart_comm);
 }

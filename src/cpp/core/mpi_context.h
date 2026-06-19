@@ -32,6 +32,8 @@ public:
 
     double allreduce_max(double local_val) const;
     double allreduce_sum(double local_val) const;
+    int allreduce_max_int(int local_val) const;
+    int64_t allreduce_sum_int64(int64_t local_val) const;
 
     void send_double(const double* buf, int count, int dest, int tag) const;
     void recv_double(double* buf, int count, int src, int tag) const;

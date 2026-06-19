@@ -4,12 +4,50 @@
 #include "sparse/csr_matrix.h"
 #include "sparse/sparse_ops.h"
 #include "solver/boundary.h"
+#include "solver/wave_equation.h"
+#include "core/fault_tolerance.h"
 #include "io/hdf5_io.h"
 
 namespace py = pybind11;
 
 PYBIND11_MODULE(seismic_engine, m) {
-    m.doc() = "Deep-sea seismic wave tomography C++ engine with MPI parallelism";
+    m.doc() = "Deep-sea seismic wave tomography C++ engine with MPI parallelism and fault tolerance";
+
+    py::enum_<seismic::HealthStatus>(m, "HealthStatus")
+        .value("HEALTHY", seismic::HealthStatus::HEALTHY)
+        .value("NAN_DETECTED", seismic::HealthStatus::NAN_DETECTED)
+        .value("INF_DETECTED", seismic::HealthStatus::INF_DETECTED)
+        .value("CFL_VIOLATION", seismic::HealthStatus::CFL_VIOLATION)
+        .value("DIVERGENCE", seismic::HealthStatus::DIVERGENCE)
+        .value("COMM_FAILURE", seismic::HealthStatus::COMM_FAILURE);
+
+    py::enum_<seismic::StepResult>(m, "StepResult")
+        .value("OK", seismic::StepResult::OK)
+        .value("NAN_DETECTED_AND_REPAIRED", seismic::StepResult::NAN_DETECTED_AND_REPAIRED)
+        .value("CFL_VIOLATION", seismic::StepResult::CFL_VIOLATION)
+        .value("FATAL_DIVERGENCE", seismic::StepResult::FATAL_DIVERGENCE);
+
+    py::class_<seismic::FaultRecord>(m, "FaultRecord")
+        .def_readonly("rank", &seismic::FaultRecord::rank)
+        .def_readonly("status", &seismic::FaultRecord::status)
+        .def_readonly("timestep", &seismic::FaultRecord::timestep)
+        .def_readonly("cell_index", &seismic::FaultRecord::cell_index)
+        .def_readonly("offending_value", &seismic::FaultRecord::offending_value)
+        .def_readonly("velocity_at_fault", &seismic::FaultRecord::velocity_at_fault);
+
+    py::class_<seismic::FaultTolerance::FaultStats>(m, "FaultStats")
+        .def_readonly("total_nan_count", &seismic::FaultTolerance::FaultStats::total_nan_count)
+        .def_readonly("total_inf_count", &seismic::FaultTolerance::FaultStats::total_inf_count)
+        .def_readonly("cells_repaired", &seismic::FaultTolerance::FaultStats::cells_repaired)
+        .def_readonly("timesteps_recovered", &seismic::FaultTolerance::FaultStats::timesteps_recovered)
+        .def_readonly("global_abort_count", &seismic::FaultTolerance::FaultStats::global_abort_count);
+
+    py::class_<seismic::PropagationResult>(m, "PropagationResult")
+        .def_readonly("status", &seismic::PropagationResult::status)
+        .def_readonly("total_nan_encountered", &seismic::PropagationResult::total_nan_encountered)
+        .def_readonly("total_cells_repaired", &seismic::PropagationResult::total_cells_repaired)
+        .def_readonly("timesteps_completed", &seismic::PropagationResult::timesteps_completed)
+        .def_readonly("completed_successfully", &seismic::PropagationResult::completed_successfully);
 
     py::class_<seismic::CSRMatrix>(m, "CSRMatrix")
         .def(py::init<>())
@@ -233,4 +271,32 @@ PYBIND11_MODULE(seismic_engine, m) {
        py::arg("origin_x"), py::arg("origin_y"), py::arg("water_depth"),
        py::arg("gradient"), py::arg("roughness"),
        "Generate synthetic deep-sea bathymetry for irregular terrain boundary conditions");
+
+    m.def("check_field_health", [](py::array_t<double, py::array::c_style | py::array::forcecast> data) {
+        auto d = data.unchecked<1>();
+        int64_t nan_count = seismic::FaultTolerance::count_nan_inf(d.data(0), d.shape(0));
+        return nan_count;
+    }, py::arg("data"),
+       "Count NaN/Inf values in a field array");
+
+    m.def("clamp_field_safe", [](py::array_t<double, py::array::c_style | py::array::forcecast> data,
+                                  double lo, double hi) {
+        auto d = data.mutable_unchecked<1>();
+        seismic::FaultTolerance::clamp_field(d.mutable_data(0), d.shape(0), lo, hi);
+        return data;
+    }, py::arg("data"), py::arg("lo") = -1e10, py::arg("hi") = 1e10,
+       "Clamp field values to safe range, replacing NaN/Inf with 0");
+
+    m.def("repair_field_nan", [](py::array_t<double, py::array::c_style | py::array::forcecast> data,
+                                  int64_t nx, int64_t ny, int64_t nz,
+                                  int halo_width, double replace_value) {
+        seismic::GridParams params{1, 1, 1, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0};
+        seismic::CartesianGrid grid(params, (int[]){0, 0, 0}, (int[]){1, 1, 1});
+        seismic::FaultTolerance ft(MPI_COMM_SELF, 0, 1);
+        auto d = data.mutable_unchecked<1>();
+        ft.repair_field_nan(d.mutable_data(0), d.shape(0), nx, ny, nz, halo_width, replace_value);
+        return data;
+    }, py::arg("data"), py::arg("nx"), py::arg("ny"), py::arg("nz"),
+       py::arg("halo_width") = 1, py::arg("replace_value") = 0.0,
+       "Repair NaN/Inf cells by averaging valid neighbors");
 }
