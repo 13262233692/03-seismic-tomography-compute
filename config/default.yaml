@@ -1,0 +1,32 @@
+solver:
+  frequency: 2.0
+  dt: 0.001
+  nt: 5000
+  water_depth: 4000.0
+  seafloor_gradient: 0.05
+  sponge_width: 20
+  sponge_damping: 0.015
+  snapshot_interval: 100
+  output_dir: ./output
+
+model:
+  vp_min: 1450.0
+  vp_max: 8500.0
+  vs_min: 0.0
+  vs_max: 5000.0
+  rho_min: 1000.0
+  rho_max: 3300.0
+  initial_vp: 1500.0
+  initial_vs: 0.0
+  initial_rho: 2200.0
+
+inversion:
+  max_iterations: 50
+  step_length: 0.01
+  gradient_smoothing_sigma: 2.0
+  regularization_lambda: 0.0001
+  misfit_tolerance: 0.000001
+  misfit_type: cross_correlation
+  gradient_precondition: 1
+  line_search_max: 10
+  line_search_factor: 0.5
